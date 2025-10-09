@@ -213,3 +213,6 @@ data/external/*.csv
 data/interim/*.csv
 data/processed/*.csv
 data/raw/*.csv
+
+
+.DS_Store
