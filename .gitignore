@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+## Data 
+
+data/*.csv
+data/external/*.csv
+data/interim/*.csv
+data/processed/*.csv
+data/raw/*.csv
+
+
+.DS_Store
