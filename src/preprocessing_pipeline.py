@@ -297,7 +297,7 @@ def build_preprocessed_data(
     random_state: int = 207,
 ) -> Dict[str, Any]:
     """
-    End-to-end preprocessing pipeline that mirrors the notebook, starting from raw CSV.
+    End-to-end preprocessing pipeline that mirrors Shanti's notebook, starting from raw CSV.
 
     Returns a dict containing:
       - X_train_cont_std, X_val_cont_std, X_test_cont_std
@@ -364,7 +364,7 @@ def build_preprocessed_data(
 
 
 if __name__ == "__main__":
-    # quick sanity check
+    # check output
     data = build_preprocessed_data()
     print("X_train_cont_std shape:", data["X_train_cont_std"].shape)
     print("X_train_std shape:", data["X_train_std"].shape)
