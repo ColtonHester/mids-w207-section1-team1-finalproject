@@ -20,7 +20,7 @@ def _drop_high_missing_columns(df: pd.DataFrame, thresh_ratio: float = 0.8) -> p
 
 
 def _create_fire_size_label(df: pd.DataFrame) -> pd.DataFrame:
-    """Create FIRE_SIZE_LABEL using the 'bins_04' logic from the notebook."""
+    """Create FIRE_SIZE_LABEL using the 'bins_04' logic from 's notebook."""
     bins_04 = [0, 100, 4999, 29000, df["FIRE_SIZE"].max()]
     group_names = ["small", "medium", "large", "very large"]
     df = df.copy()
@@ -100,7 +100,7 @@ def _train_val_test_split(
 
 
 def _select_features(df_train: pd.DataFrame) -> List[str]:
-    """Construct the feature list exactly as in the notebook."""
+    """Construct the feature list - Same as in Shanti's notebook."""
     # from FPA FOD data
     trgt_feat_fod = [
         "FIRE_SIZE_LABEL",
