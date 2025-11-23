@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Tuple
+from imblearn.over_sampling import SMOTE
 
 from sklearn.model_selection import train_test_split
 from sklearn.impute import SimpleImputer
@@ -295,6 +296,7 @@ def _standardize_features(
 def build_preprocessed_data(
     n_per_class: int = 1000,
     random_state: int = 207,
+    use_smote: bool = False,
 ) -> Dict[str, Any]:
     """
     End-to-end preprocessing pipeline that mirrors Shanti's notebook, starting from raw CSV.
@@ -318,7 +320,10 @@ def build_preprocessed_data(
     df = _create_fire_size_label(df)
 
     # 4. Balanced sampling
-    df_mini = _sample_balanced_classes(df, n_per_class=n_per_class, random_state=random_state)
+    if use_smote:
+        df_mini = df
+    else:
+        df_mini = _sample_balanced_classes(df, n_per_class=n_per_class, random_state=random_state)
 
     # 5. Map FIRE_SIZE_LABEL to numeric
     df_mini = _encode_fire_size_label_numeric(df_mini)
@@ -351,6 +356,19 @@ def build_preprocessed_data(
 
     # 12. One-hot encode NWCG_CAUSE_CLASSIFICATION and GACC_PL
     df_train, df_val, df_test = _one_hot_encode(df_train, df_val, df_test)
+
+    if use_smote:
+        X_train = df_train.drop(columns=["FIRE_SIZE_LABEL"])
+        y_train = df_train["FIRE_SIZE_LABEL"]
+
+        # Apply SMOTE
+        print("Applying SMOTE...")
+        smote = SMOTE(random_state=random_state)
+        X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+        print("SMOTE done.")
+
+        # Reconstruct df_train with resampled data
+        df_train = pd.concat([X_train_res, y_train_res], axis=1)
 
     # 13. Standardize continuous features and return arrays/metadata
     result = _standardize_features(df_train, df_val, df_test)
