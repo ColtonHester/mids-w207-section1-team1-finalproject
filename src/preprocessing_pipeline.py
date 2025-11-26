@@ -21,7 +21,7 @@ def _drop_high_missing_columns(df: pd.DataFrame, thresh_ratio: float = 0.8) -> p
 
 
 def _create_fire_size_label(df: pd.DataFrame) -> pd.DataFrame:
-    """Create FIRE_SIZE_LABEL using the 'bins_04' logic from 's notebook."""
+    """Create FIRE_SIZE_LABEL using the 'bins_04' logic from Shanti's notebook."""
     bins_04 = [0, 100, 4999, 29000, df["FIRE_SIZE"].max()]
     group_names = ["small", "medium", "large", "very large"]
     df = df.copy()
@@ -75,26 +75,42 @@ def _train_val_test_split(
     val_pct: float = 0.2,
     test_pct: float = 0.2,
     random_state: int = 207,
+    stratify_cols: List[str] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Reproduce the 60/20/20 split stratified by FIRE_YEAR."""
     if not np.isclose(train_pct + val_pct + test_pct, 1.0):
         raise ValueError("train_pct + val_pct + test_pct must equal 1.0")
 
+    if stratify_cols is None:
+        stratify_cols = ["FIRE_YEAR"]
+
     # val_size relative to (train+val) part
     val_size = val_pct / (train_pct + val_pct)
+
+    # Determine stratify labels for the first split
+    if len(stratify_cols) == 1:
+        stratify_labels = df_mini[stratify_cols[0]]
+    else:
+        stratify_labels = list(zip(*[df_mini[c] for c in stratify_cols]))
 
     df_train_main, df_test = train_test_split(
         df_mini,
         test_size=test_pct,
         random_state=random_state,
-        stratify=df_mini["FIRE_YEAR"],
+        stratify=stratify_labels,
     )
+
+    # Determine stratify labels for the second split
+    if len(stratify_cols) == 1:
+        stratify_labels_main = df_train_main[stratify_cols[0]]
+    else:
+        stratify_labels_main = list(zip(*[df_train_main[c] for c in stratify_cols]))
 
     df_train, df_val = train_test_split(
         df_train_main,
         test_size=val_size,
         random_state=random_state,
-        stratify=df_train_main["FIRE_YEAR"],
+        stratify=stratify_labels_main,
     )
 
     return df_train, df_val, df_test
@@ -334,7 +350,16 @@ def build_preprocessed_data(
     df_mini = df_mini.loc[shuffled_idx].reset_index(drop=True)
 
     # 7. Train/val/test split (60/20/20) stratified by FIRE_YEAR
-    df_train, df_val, df_test = _train_val_test_split(df_mini, random_state=random_state)
+    # If using SMOTE, we also stratify by FIRE_SIZE_LABEL to preserve class distribution in splits
+    stratify_cols = ["FIRE_YEAR"]
+    if use_smote:
+        stratify_cols.append("FIRE_SIZE_LABEL")
+
+    df_train, df_val, df_test = _train_val_test_split(
+        df_mini,
+        random_state=random_state,
+        stratify_cols=stratify_cols
+    )
 
     # 8. Select features of interest (same logic as notebook)
     trgt_feat_selected = _select_features(df_train)
