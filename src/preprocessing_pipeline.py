@@ -408,9 +408,28 @@ def build_preprocessed_data(
 
 if __name__ == "__main__":
     # check output
-    data = build_preprocessed_data()
-    print("X_train_cont_std shape:", data["X_train_cont_std"].shape)
-    print("X_train_std shape:", data["X_train_std"].shape)
-    print("Y_train shape:", data["Y_train"].shape)
-    print("Number of continuous features:", len(data["cols_continuous"]))
-    print("Number of one-hot features:", len(data["cols_onehot"]))
+    data = build_preprocessed_data(use_smote=True)
+    Y_train_resampled = data["Y_train"]
+    X_train_res_std = data["X_train_std"]
+    Y_val = data["Y_val"]
+    X_val_std = data["X_val_std"]
+    Y_test = data["Y_test"]
+    X_test_std = data["X_test_std"]
+    pairs = [(Y_train_resampled, X_train_res_std, 'Training Data'),
+             (Y_val, X_val_std, 'Validation Data'),
+             (Y_test, X_test_std, 'Test Data')]
+
+    for pair in pairs:
+        print(f"{'-' * 10} {pair[2]} {'-' * 10}")
+        print(f"Shape of Y: {pair[0].shape}; Shape of X: {pair[1].shape}")
+        print(f"Y: {np.mean(pair[0]): .7f}")
+        print(f"X Mean: {np.mean(pair[1]): .7f}")
+        print(f"X Std: {np.std(pair[1]): .7f}")
+        print(f"X Min: {np.min(pair[1]): .7f}")
+        print(f"X Max: {np.min(pair[1]): .7f}\n")
+
+    # feature mean
+    for pair in pairs:
+        print(f"{'-' * 10} {pair[2]} : Feature Mean {'-' * 10}")
+        print(f"Number of features: {len(np.mean(pair[1], axis=0))}")  # sanity check
+        print(f"{np.mean(pair[1], axis=0)}\n")
