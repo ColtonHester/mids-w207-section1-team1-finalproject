@@ -2,14 +2,31 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Tuple
-from imblearn.over_sampling import SMOTE
+import gc
+from typing import Dict, Any, List, Tuple, Optional
+from imblearn.over_sampling import SMOTE, SMOTENC
 
 from sklearn.model_selection import train_test_split
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 
 from src.data_loader import load_data_from_csv
+
+# Adding some memory checks to monitor memory usage during preprocessing
+def _get_memory_usage_gb() -> float:
+    """Return current process memory usage in GB."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / 1e9
+    except ImportError:
+        return -1.0
+
+
+def _log_memory(stage: str) -> None:
+    """Log memory usage at a given stage."""
+    mem = _get_memory_usage_gb()
+    if mem > 0:
+        print(f"[Memory] {stage}: {mem:.2f} GB")
 
 
 def _drop_high_missing_columns(df: pd.DataFrame, thresh_ratio: float = 0.8) -> pd.DataFrame:
@@ -24,7 +41,6 @@ def _create_fire_size_label(df: pd.DataFrame) -> pd.DataFrame:
     """Create FIRE_SIZE_LABEL using the 'bins_04' logic from Shanti's notebook."""
     bins_04 = [0, 100, 4999, 29000, df["FIRE_SIZE"].max()]
     group_names = ["small", "medium", "large", "very large"]
-    df = df.copy()
     df["FIRE_SIZE_LABEL"] = pd.cut(df["FIRE_SIZE"], bins_04, labels=group_names)
     return df
 
@@ -33,7 +49,6 @@ def _sample_balanced_classes(df: pd.DataFrame, n_per_class: int = 1000, random_s
     """Sample n_per_class rows from each FIRE_SIZE_LABEL class using FPA_ID-based sampling."""
     rng = np.random.RandomState(random_state)
 
-    # ensure we have the column
     if "FPA_ID" not in df.columns:
         raise ValueError("Expected column 'FPA_ID' not found in dataframe.")
 
@@ -56,6 +71,68 @@ def _sample_balanced_classes(df: pd.DataFrame, n_per_class: int = 1000, random_s
     return df_mini
 
 
+def _sample_stratified_for_smote(
+        df: pd.DataFrame,
+        minority_n: int = 2000,
+        majority_cap: int = 8000,
+        random_state: int = 207
+) -> pd.DataFrame:
+    """
+    Sample data for SMOTE: keep more minority samples, cap majority class.
+
+    This creates an imbalanced but manageable dataset that SMOTE can then balance.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Full dataset with FIRE_SIZE_LABEL column
+    minority_n : int
+        Target samples for minority classes (or all available if fewer exist)
+    majority_cap : int
+        Maximum samples from majority class
+    random_state : int
+        Random seed for reproducibility
+
+    Returns
+    -------
+    pd.DataFrame
+        Stratified sample suitable for SMOTE augmentation
+    """
+    rng = np.random.RandomState(random_state)
+
+    if "FPA_ID" not in df.columns:
+        raise ValueError("Expected column 'FPA_ID' not found in dataframe.")
+
+    # Get class distribution
+    class_counts = df["FIRE_SIZE_LABEL"].value_counts()
+    print(f"Original class distribution:\n{class_counts}")
+
+    labels = ["small", "medium", "large", "very large"]
+    df_list = []
+
+    for label in labels:
+        fpaid = df.loc[df["FIRE_SIZE_LABEL"] == label, "FPA_ID"].values
+        available = len(fpaid)
+
+        # Determine sample size: minority_n for small classes, capped for large
+        if available <= minority_n:
+            # Take all available for rare classes
+            sample_size = available
+        elif label == "small":  # Typically the majority class
+            sample_size = min(available, majority_cap)
+        else:
+            sample_size = min(available, minority_n)
+
+        sampled_ids = rng.choice(fpaid, size=sample_size, replace=False)
+        df_label = df[df["FPA_ID"].isin(sampled_ids)]
+        df_list.append(df_label)
+        print(f"  {label}: sampled {sample_size} from {available}")
+
+    df_sampled = pd.concat(df_list, axis=0).reset_index(drop=True)
+    print(f"Total sampled: {len(df_sampled)} rows")
+    return df_sampled
+
+
 def _encode_fire_size_label_numeric(df: pd.DataFrame) -> pd.DataFrame:
     """Map FIRE_SIZE_LABEL from string to numeric 0..3."""
     mapping = {
@@ -64,18 +141,17 @@ def _encode_fire_size_label_numeric(df: pd.DataFrame) -> pd.DataFrame:
         "large": 2,
         "very large": 3,
     }
-    df = df.copy()
     df["FIRE_SIZE_LABEL"] = df["FIRE_SIZE_LABEL"].map(mapping)
     return df
 
 
 def _train_val_test_split(
-    df_mini: pd.DataFrame,
-    train_pct: float = 0.6,
-    val_pct: float = 0.2,
-    test_pct: float = 0.2,
-    random_state: int = 207,
-    stratify_cols: List[str] = None,
+        df_mini: pd.DataFrame,
+        train_pct: float = 0.6,
+        val_pct: float = 0.2,
+        test_pct: float = 0.2,
+        random_state: int = 207,
+        stratify_cols: List[str] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Reproduce the 60/20/20 split stratified by FIRE_YEAR."""
     if not np.isclose(train_pct + val_pct + test_pct, 1.0):
@@ -84,10 +160,8 @@ def _train_val_test_split(
     if stratify_cols is None:
         stratify_cols = ["FIRE_YEAR"]
 
-    # val_size relative to (train+val) part
     val_size = val_pct / (train_pct + val_pct)
 
-    # Determine stratify labels for the first split
     if len(stratify_cols) == 1:
         stratify_labels = df_mini[stratify_cols[0]]
     else:
@@ -100,7 +174,6 @@ def _train_val_test_split(
         stratify=stratify_labels,
     )
 
-    # Determine stratify labels for the second split
     if len(stratify_cols) == 1:
         stratify_labels_main = df_train_main[stratify_cols[0]]
     else:
@@ -118,7 +191,6 @@ def _train_val_test_split(
 
 def _select_features(df_train: pd.DataFrame) -> List[str]:
     """Construct the feature list - Same as in Shanti's notebook."""
-    # from FPA FOD data
     trgt_feat_fod = [
         "FIRE_SIZE_LABEL",
         "FIRE_YEAR",
@@ -128,54 +200,35 @@ def _select_features(df_train: pd.DataFrame) -> List[str]:
         "LONGITUDE",
     ]
 
-    # from GRIDMET: variables containing '_5D_'
     feat_gridmet = list(df_train.columns[df_train.columns.str.contains("_5D_")])
-
-    # from risk management assistance
     feat_rmgmta = ["SDI"]
-
-    # from fire stations
     feat_firestation = ["No_FireStation_20.0km"]
-
-    # from GACC
     feat_gacc = ["GACC_PL"]
-
-    # from global human modification
     feat_ghm = ["GHM"]
-
-    # from NDVI
     feat_ndvi = ["NDVI-1day"]
-
-    # from national preparedness level
     feat_npl = ["NPL"]
-
-    # from social vulnerability index
     feat_svi = ["EPL_PCI"]
-
-    # from rangeland production
     feat_rangeland = ["rpms", "rpms_1km"]
 
     trgt_feat_selected = (
-        trgt_feat_fod
-        + feat_gridmet
-        + feat_rmgmta
-        + feat_firestation
-        + feat_gacc
-        + feat_ghm
-        + feat_ndvi
-        + feat_npl
-        + feat_svi
-        + feat_rangeland
+            trgt_feat_fod
+            + feat_gridmet
+            + feat_rmgmta
+            + feat_firestation
+            + feat_gacc
+            + feat_ghm
+            + feat_ndvi
+            + feat_npl
+            + feat_svi
+            + feat_rangeland
     )
 
-    # Filter to those that actually exist in df_train
     trgt_feat_selected = [c for c in trgt_feat_selected if c in df_train.columns]
     return trgt_feat_selected
 
 
 def _impute_with_zero(df: pd.DataFrame) -> pd.DataFrame:
     """Impute the missing values in selected columns with zero."""
-    df = df.copy()
     cols_impute_zero = ["No_FireStation_20.0km", "GACC_PL"]
     for col in cols_impute_zero:
         if col in df.columns:
@@ -184,17 +237,13 @@ def _impute_with_zero(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _impute_with_mean(
-    df_train: pd.DataFrame,
-    df_val: pd.DataFrame,
-    df_test: pd.DataFrame,
-    feat_gridmet: List[str],
+        df_train: pd.DataFrame,
+        df_val: pd.DataFrame,
+        df_test: pd.DataFrame,
+        feat_gridmet: List[str],
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Impute GRIDMET + SDI + EPL_PCI + NDVI-1day with training mean."""
-    df_train = df_train.copy()
-    df_val = df_val.copy()
-    df_test = df_test.copy()
 
-    # Replace -999 in EPL_PCI with NaN
     for data in [df_train, df_val, df_test]:
         if "EPL_PCI" in data.columns:
             data["EPL_PCI"] = data["EPL_PCI"].replace(-999, np.nan)
@@ -210,6 +259,47 @@ def _impute_with_mean(
     return df_train, df_val, df_test
 
 
+def _impute_with_subgroup_mean(
+        df_train: pd.DataFrame,
+        df_val: pd.DataFrame,
+        df_test: pd.DataFrame,
+        feat_gridmet: List[str],
+        subgroup_col: str = "GACC_PL",
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Impute GRIDMET + SDI + EPL_PCI + NDVI-1day with subgroup mean (e.g. by GACC_PL).
+    Falls back to global mean if subgroup mean is NaN.
+    """
+
+    for data in [df_train, df_val, df_test]:
+        if "EPL_PCI" in data.columns:
+            data["EPL_PCI"] = data["EPL_PCI"].replace(-999, np.nan)
+
+    cols_impute = feat_gridmet + ["SDI", "EPL_PCI", "NDVI-1day"]
+    cols_impute = [c for c in cols_impute if c in df_train.columns]
+
+    if subgroup_col not in df_train.columns:
+        print(f"Warning: Subgroup column '{subgroup_col}' not found. Falling back to global mean imputation.")
+        return _impute_with_mean(df_train, df_val, df_test, feat_gridmet)
+
+    subgroup_means = df_train.groupby(subgroup_col)[cols_impute].mean()
+    global_means = df_train[cols_impute].mean()
+
+    def impute_dataframe(df_target, means_lookup, global_fallback):
+        for col in cols_impute:
+            mapped_means = df_target[subgroup_col].map(means_lookup[col])
+            df_target[col] = df_target[col].fillna(mapped_means)
+            if df_target[col].isna().any():
+                df_target[col] = df_target[col].fillna(global_fallback[col])
+        return df_target
+
+    df_train = impute_dataframe(df_train, subgroup_means, global_means)
+    df_val = impute_dataframe(df_val, subgroup_means, global_means)
+    df_test = impute_dataframe(df_test, subgroup_means, global_means)
+
+    return df_train, df_val, df_test
+
+
 def _clean_nwcg_cause_classification(df_list: List[pd.DataFrame]) -> List[pd.DataFrame]:
     """Apply mapping to NWCG_CAUSE_CLASSIFICATION."""
     mapping = {
@@ -220,7 +310,6 @@ def _clean_nwcg_cause_classification(df_list: List[pd.DataFrame]) -> List[pd.Dat
 
     cleaned = []
     for df in df_list:
-        df = df.copy()
         if "NWCG_CAUSE_CLASSIFICATION" in df.columns:
             df["NWCG_CAUSE_CLASSIFICATION"] = df["NWCG_CAUSE_CLASSIFICATION"].map(mapping)
         cleaned.append(df)
@@ -237,33 +326,175 @@ def _one_hot_encode(df_train: pd.DataFrame, df_val: pd.DataFrame, df_test: pd.Da
     df_train = pd.get_dummies(df_train, columns=cols_onehot)
     df_val = pd.get_dummies(df_val, columns=cols_onehot)
     df_test = pd.get_dummies(df_test, columns=cols_onehot)
+    train_cols = df_train.columns
 
-    # Align columns across splits
-    df_train, df_val = df_train.align(df_val, join="left", axis=1, fill_value=0)
-    df_train, df_test = df_train.align(df_test, join="left", axis=1, fill_value=0)
+    def align_to_train(df, target_cols):
+        missing = target_cols.difference(df.columns)
+        if not missing.empty:
+            df_zeros = pd.DataFrame(0, index=df.index, columns=missing)
+            df = pd.concat([df, df_zeros], axis=1)
+
+        extra = df.columns.difference(target_cols)
+        if not extra.empty:
+            df.drop(columns=extra, inplace=True)
+
+        return df[target_cols]
+
+    df_val = align_to_train(df_val, train_cols)
+    df_test = align_to_train(df_test, train_cols)
 
     return df_train, df_val, df_test
 
 
+def _apply_smotenc(
+        df_train: pd.DataFrame,
+        random_state: int = 207,
+        sampling_strategy: str = "auto"
+) -> pd.DataFrame:
+    """
+    Apply SMOTENC to training data with memory-safe practices.
+
+    Parameters
+    ----------
+    df_train : pd.DataFrame
+        Training data with FIRE_SIZE_LABEL as target
+    random_state : int
+        Random seed
+    sampling_strategy : str or dict
+        SMOTE sampling strategy. Use 'auto' to balance all classes,
+        or a dict like {1: 5000, 2: 5000, 3: 5000} to specify target counts.
+
+    Returns
+    -------
+    pd.DataFrame
+        Resampled training data
+    """
+    _log_memory("Before SMOTENC")
+
+    X_train = df_train.drop(columns=["FIRE_SIZE_LABEL"])
+    y_train = df_train["FIRE_SIZE_LABEL"]
+    x_columns = X_train.columns.tolist()
+
+    print(f"SMOTENC input shape: {X_train.shape}")
+    print(f"Class distribution before SMOTE:\n{y_train.value_counts().sort_index()}")
+
+    # Identify categorical features
+    cat_cols = ["NWCG_CAUSE_CLASSIFICATION", "GACC_PL", "STATE"]
+    present_cat_cols = [c for c in cat_cols if c in X_train.columns]
+
+    if not present_cat_cols:
+        raise ValueError("No categorical columns found for SMOTENC. Use standard SMOTE instead.")
+
+    # Label encode categoricals (suitable for SMOTENC)
+    label_encoders = {}
+    for c in present_cat_cols:
+        X_train[c] = X_train[c].fillna("Missing")
+        le = LabelEncoder()
+        X_train[c] = le.fit_transform(X_train[c].astype(str))
+        label_encoders[c] = le
+
+    # Handle inf/nan in continuous features
+    continuous_cols = [c for c in X_train.columns if c not in present_cat_cols]
+    if continuous_cols:
+        X_cont = X_train[continuous_cols].astype("float64")
+        inf_mask = ~np.isfinite(X_cont)
+        if inf_mask.values.any():
+            print("Warning: Replacing inf/-inf values with column means.")
+            X_cont[inf_mask] = np.nan
+            col_means = X_cont.mean(axis=0)
+            X_cont = X_cont.fillna(col_means)
+            for col in continuous_cols:
+                orig_dtype = X_train[col].dtype
+                if np.issubdtype(orig_dtype, np.number):
+                    X_train[col] = X_cont[col].astype(orig_dtype)
+                else:
+                    X_train[col] = X_cont[col]
+
+    cat_indices = [X_train.columns.get_loc(c) for c in present_cat_cols]
+
+    # Apply SMOTENC
+    smotenc = SMOTENC(
+        categorical_features=cat_indices,
+        random_state=random_state,
+        sampling_strategy=sampling_strategy,
+        # n_jobs=-1  # Use all cores for k-NN
+    )
+
+    _log_memory("Before fit_resample")
+    X_train_res, y_train_res = smotenc.fit_resample(X_train, y_train)
+    _log_memory("After fit_resample")
+
+    print(f"SMOTENC output shape: {X_train_res.shape}")
+    print(f"Class distribution after SMOTE:\n{pd.Series(y_train_res).value_counts().sort_index()}")
+
+    # Cleanup
+    del X_train, y_train, smotenc
+    gc.collect()
+
+    # Convert back to DataFrame
+    if not isinstance(X_train_res, pd.DataFrame):
+        X_train_res = pd.DataFrame(X_train_res, columns=x_columns)
+
+    # Inverse transform categoricals
+    for c in present_cat_cols:
+        le = label_encoders[c]
+        X_train_res[c] = le.inverse_transform(X_train_res[c].astype(int))
+
+    # Reconstruct full dataframe
+    df_train_resampled = pd.concat([X_train_res, pd.Series(y_train_res, name="FIRE_SIZE_LABEL")], axis=1)
+
+    del X_train_res, y_train_res
+    gc.collect()
+
+    return df_train_resampled
+
+
+def _apply_smote(
+        df_train: pd.DataFrame,
+        random_state: int = 207,
+        sampling_strategy: str = "auto"
+) -> pd.DataFrame:
+    """Apply standard SMOTE to training data (after one-hot encoding)."""
+    _log_memory("Before SMOTE")
+
+    X_train = df_train.drop(columns=["FIRE_SIZE_LABEL"])
+    y_train = df_train["FIRE_SIZE_LABEL"]
+
+    print(f"SMOTE input shape: {X_train.shape}")
+    print(f"Class distribution before SMOTE:\n{y_train.value_counts().sort_index()}")
+
+    smote = SMOTE(random_state=random_state, sampling_strategy=sampling_strategy, n_jobs=-1)
+    X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+
+    print(f"SMOTE output shape: {X_train_res.shape}")
+    print(f"Class distribution after SMOTE:\n{pd.Series(y_train_res).value_counts().sort_index()}")
+
+    _log_memory("After SMOTE")
+
+    df_train_resampled = pd.concat([
+        pd.DataFrame(X_train_res, columns=X_train.columns),
+        pd.Series(y_train_res, name="FIRE_SIZE_LABEL")
+    ], axis=1)
+
+    return df_train_resampled
+
+
 def _standardize_features(
-    df_train: pd.DataFrame,
-    df_val: pd.DataFrame,
-    df_test: pd.DataFrame,
+        df_train: pd.DataFrame,
+        df_val: pd.DataFrame,
+        df_test: pd.DataFrame,
 ) -> Dict[str, Any]:
     """Standardize continuous features, keep one-hot as is, return arrays and metadata."""
-    # outcome
     y_train = df_train["FIRE_SIZE_LABEL"].values
     y_val = df_val["FIRE_SIZE_LABEL"].values
     y_test = df_test["FIRE_SIZE_LABEL"].values
 
-    # feature set (drop outcome)
     feature_cols = [c for c in df_train.columns if c != "FIRE_SIZE_LABEL"]
 
     X_train = df_train[feature_cols]
     X_val = df_val[feature_cols]
     X_test = df_test[feature_cols]
 
-    # identify one-hot columns
     cols_nwcg = [c for c in X_train.columns if "NWCG_CAUSE_CLASSIFICATION" in c]
     cols_gacc = [c for c in X_train.columns if "GACC_PL" in c]
     cols_onehot = cols_nwcg + cols_gacc
@@ -283,7 +514,6 @@ def _standardize_features(
     X_val_cont_std = scaler.transform(X_val_continuous)
     X_test_cont_std = scaler.transform(X_test_continuous)
 
-    # concatenate continuous + one-hot
     if cols_onehot:
         X_train_std = np.concatenate([X_train_cont_std, X_train_onehot.values], axis=1)
         X_val_std = np.concatenate([X_val_cont_std, X_val_onehot.values], axis=1)
@@ -310,36 +540,79 @@ def _standardize_features(
 
 
 def build_preprocessed_data(
-    n_per_class: int = 1000,
-    random_state: int = 207,
-    use_smote: bool = False,
+        n_per_class: int = 1000,
+        random_state: int = 207,
+        use_smote: bool = False,
+        impute_strategy: str = "mean",
+        smote_strategy: str = "smote",
+        smote_sampling_strategy: str = "auto",
+        # New parameters for SMOTE pre-sampling
+        smote_minority_n: int = 2000,
+        smote_majority_cap: int = 8000,
 ) -> Dict[str, Any]:
     """
     End-to-end preprocessing pipeline that mirrors Shanti's notebook, starting from raw CSV.
 
-    Returns a dict containing:
-      - X_train_cont_std, X_val_cont_std, X_test_cont_std
-      - X_train_std, X_val_std, X_test_std
-      - Y_train, Y_val, Y_test
-      - cols_continuous, cols_onehot, feature_cols
-      - df_train_raw, df_val_raw, df_test_raw (before standardization, after encoding/imputation)
+    Parameters
+    ----------
+    n_per_class : int
+        Number of samples per class when NOT using SMOTE (balanced sampling)
+    random_state : int
+        Random seed for reproducibility
+    use_smote : bool
+        Whether to apply SMOTE/SMOTENC for class balancing
+    impute_strategy : str
+        "mean" or "subgroup_mean"
+    smote_strategy : str
+        "smote" (standard, after one-hot) or "smotenc" (handles categoricals natively)
+    smote_sampling_strategy : str or dict
+        Passed to SMOTE. Use "auto" for full balancing, or dict for custom targets.
+    smote_minority_n : int
+        When use_smote=True, sample up to this many from minority classes before SMOTE
+    smote_majority_cap : int
+        When use_smote=True, cap majority class at this size before SMOTE
+
+    Returns
+    -------
+    dict
+        Contains X_train_std, X_val_std, X_test_std, Y_train, Y_val, Y_test, and metadata
     """
+    _log_memory("Pipeline start")
+
     # 1. Load raw data
     df_init = load_data_from_csv(convert_to_pandas=True)
     if df_init is None:
         raise RuntimeError("Failed to load data from CSV via data_loader.load_data_from_csv.")
 
+    _log_memory("After data load")
+    print(f"Loaded {len(df_init)} rows")
+
     # 2. Drop columns with >80% missing
     df = _drop_high_missing_columns(df_init)
+    del df_init
+    gc.collect()
 
     # 3. Create FIRE_SIZE_LABEL
     df = _create_fire_size_label(df)
 
-    # 4. Balanced sampling
+    # 4. Sampling strategy - ALWAYS sample before SMOTE to avoid OOM
     if use_smote:
-        df_mini = df
+        # Pre-sample with stratified approach for SMOTE
+        print(f"\nPre-sampling for SMOTE (minority_n={smote_minority_n}, majority_cap={smote_majority_cap})...")
+        df_mini = _sample_stratified_for_smote(
+            df,
+            minority_n=smote_minority_n,
+            majority_cap=smote_majority_cap,
+            random_state=random_state
+        )
     else:
+        # Standard balanced sampling
         df_mini = _sample_balanced_classes(df, n_per_class=n_per_class, random_state=random_state)
+
+    # Free the full dataset
+    del df
+    gc.collect()
+    _log_memory("After sampling")
 
     # 5. Map FIRE_SIZE_LABEL to numeric
     df_mini = _encode_fire_size_label_numeric(df_mini)
@@ -349,8 +622,7 @@ def build_preprocessed_data(
     shuffled_idx = rng.permutation(df_mini.index)
     df_mini = df_mini.loc[shuffled_idx].reset_index(drop=True)
 
-    # 7. Train/val/test split (60/20/20) stratified by FIRE_YEAR
-    # If using SMOTE, we also stratify by FIRE_SIZE_LABEL to preserve class distribution in splits
+    # 7. Train/val/test split (60/20/20)
     stratify_cols = ["FIRE_YEAR"]
     if use_smote:
         stratify_cols.append("FIRE_SIZE_LABEL")
@@ -361,11 +633,20 @@ def build_preprocessed_data(
         stratify_cols=stratify_cols
     )
 
-    # 8. Select features of interest (same logic as notebook)
+    del df_mini
+    gc.collect()
+
+    # 8. Select features of interest
     trgt_feat_selected = _select_features(df_train)
-    df_train = df_train[trgt_feat_selected].copy()
-    df_val = df_val[trgt_feat_selected].copy()
-    df_test = df_test[trgt_feat_selected].copy()
+    df_train = df_train[trgt_feat_selected]
+    df_val = df_val[trgt_feat_selected]
+    df_test = df_test[trgt_feat_selected]
+
+    # Downcast floats to reduce memory
+    for data in [df_train, df_val, df_test]:
+        cols_float = data.select_dtypes(include=['float64']).columns
+        data[cols_float] = data[cols_float].astype('float32')
+    gc.collect()
 
     # 9. Impute selected vars with zero
     df_train = _impute_with_zero(df_train)
@@ -374,50 +655,80 @@ def build_preprocessed_data(
 
     # 10. Impute mean for GRIDMET + SDI + EPL_PCI + NDVI-1day
     feat_gridmet = [c for c in df_train.columns if "_5D_" in c]
-    df_train, df_val, df_test = _impute_with_mean(df_train, df_val, df_test, feat_gridmet)
+
+    if impute_strategy == "subgroup_mean":
+        print("Imputing with subgroup mean (GACC_PL)...")
+        df_train, df_val, df_test = _impute_with_subgroup_mean(
+            df_train, df_val, df_test, feat_gridmet, subgroup_col="GACC_PL"
+        )
+    else:
+        print("Imputing with global mean...")
+        df_train, df_val, df_test = _impute_with_mean(df_train, df_val, df_test, feat_gridmet)
 
     # 11. Clean NWCG_CAUSE_CLASSIFICATION
     df_train, df_val, df_test = _clean_nwcg_cause_classification([df_train, df_val, df_test])
 
-    # 12. One-hot encode NWCG_CAUSE_CLASSIFICATION and GACC_PL
+    # 12. Apply SMOTE (now on manageable pre-sampled data)
+    if use_smote and smote_strategy == "smotenc":
+        print("\nApplying SMOTENC on pre-sampled data...")
+        df_train = _apply_smotenc(
+            df_train,
+            random_state=random_state,
+            sampling_strategy=smote_sampling_strategy
+        )
+
+    # 13. One-Hot Encode
     df_train, df_val, df_test = _one_hot_encode(df_train, df_val, df_test)
+    gc.collect()
 
-    if use_smote:
-        X_train = df_train.drop(columns=["FIRE_SIZE_LABEL"])
-        y_train = df_train["FIRE_SIZE_LABEL"]
+    # 14. Standard SMOTE (after one-hot encoding)
+    if use_smote and smote_strategy == "smote":
+        print("\nApplying standard SMOTE...")
+        df_train = _apply_smote(
+            df_train,
+            random_state=random_state,
+            sampling_strategy=smote_sampling_strategy
+        )
 
-        # Apply SMOTE
-        print("Applying SMOTE...")
-        smote = SMOTE(random_state=random_state)
-        X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
-        print("SMOTE done.")
-
-        # Reconstruct df_train with resampled data
-        df_train = pd.concat([X_train_res, y_train_res], axis=1)
-
-    # 13. Standardize continuous features and return arrays/metadata
+    # 15. Standardize continuous features and return arrays/metadata
     result = _standardize_features(df_train, df_val, df_test)
 
-    # keep the processed dataframes (after encoding/imputation) if you want to inspect later
     result["df_train_processed"] = df_train
     result["df_val_processed"] = df_val
     result["df_test_processed"] = df_test
+
+    _log_memory("Pipeline complete")
 
     return result
 
 
 if __name__ == "__main__":
-    # check output
-    data = build_preprocessed_data(use_smote=True)
+    # Test run with SMOTENC
+    print("=" * 60)
+    print("Running preprocessing pipeline with SMOTENC")
+    print("=" * 60)
+
+    data = build_preprocessed_data(
+        use_smote=True,
+        smote_strategy='smotenc',
+        impute_strategy='subgroup_mean',
+        # Control pre-sampling size for SMOTE
+        smote_minority_n=50000,
+        smote_majority_cap=100000,
+    )
+
     Y_train_resampled = data["Y_train"]
     X_train_res_std = data["X_train_std"]
     Y_val = data["Y_val"]
     X_val_std = data["X_val_std"]
     Y_test = data["Y_test"]
     X_test_std = data["X_test_std"]
-    pairs = [(Y_train_resampled, X_train_res_std, 'Training Data'),
-             (Y_val, X_val_std, 'Validation Data'),
-             (Y_test, X_test_std, 'Test Data')]
+
+    pairs = [
+        (Y_train_resampled, X_train_res_std, 'Training Data'),
+        (Y_val, X_val_std, 'Validation Data'),
+        (Y_test, X_test_std, 'Test Data')
+    ]
 
     for pair in pairs:
         print(f"{'-' * 10} {pair[2]} {'-' * 10}")
@@ -426,10 +737,9 @@ if __name__ == "__main__":
         print(f"X Mean: {np.mean(pair[1]): .7f}")
         print(f"X Std: {np.std(pair[1]): .7f}")
         print(f"X Min: {np.min(pair[1]): .7f}")
-        print(f"X Max: {np.min(pair[1]): .7f}\n")
+        print(f"X Max: {np.max(pair[1]): .7f}\n")
 
-    # feature mean
     for pair in pairs:
         print(f"{'-' * 10} {pair[2]} : Feature Mean {'-' * 10}")
-        print(f"Number of features: {len(np.mean(pair[1], axis=0))}")  # sanity check
+        print(f"Number of features: {len(np.mean(pair[1], axis=0))}")
         print(f"{np.mean(pair[1], axis=0)}\n")
