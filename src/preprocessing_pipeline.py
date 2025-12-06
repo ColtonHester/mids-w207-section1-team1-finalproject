@@ -12,6 +12,7 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 
 from src.data_loader import load_data_from_csv
 
+
 # Adding some memory checks to monitor memory usage during preprocessing
 def _get_memory_usage_gb() -> float:
     """Return current process memory usage in GB."""
@@ -346,6 +347,53 @@ def _one_hot_encode(df_train: pd.DataFrame, df_val: pd.DataFrame, df_test: pd.Da
     return df_train, df_val, df_test
 
 
+def _label_encode_categoricals(
+        df_train: pd.DataFrame,
+        df_val: pd.DataFrame,
+        df_test: pd.DataFrame,
+        cat_cols: List[str] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, LabelEncoder]]:
+    """
+    Label encode categorical columns for embedding models.
+
+    Returns the dataframes with label-encoded categoricals and a dict of fitted encoders.
+    Unknown categories in val/test are mapped to a special index (num_classes).
+    """
+    if cat_cols is None:
+        cat_cols = ["NWCG_CAUSE_CLASSIFICATION", "GACC_PL"]
+
+    cat_cols = [c for c in cat_cols if c in df_train.columns]
+    label_encoders = {}
+
+    for col in cat_cols:
+        le = LabelEncoder()
+
+        # Fill NaN with a placeholder before encoding
+        df_train[col] = df_train[col].fillna("_MISSING_")
+        df_val[col] = df_val[col].fillna("_MISSING_")
+        df_test[col] = df_test[col].fillna("_MISSING_")
+
+        # Fit on training data
+        le.fit(df_train[col].astype(str))
+        label_encoders[col] = le
+
+        # Transform training data
+        df_train[col] = le.transform(df_train[col].astype(str))
+
+        # Handle unknown categories in val/test by mapping to num_classes (OOV index)
+        def safe_transform(series, encoder):
+            known_classes = set(encoder.classes_)
+            oov_idx = len(encoder.classes_)  # Index for out-of-vocabulary
+            return series.astype(str).apply(
+                lambda x: encoder.transform([x])[0] if x in known_classes else oov_idx
+            )
+
+        df_val[col] = safe_transform(df_val[col], le)
+        df_test[col] = safe_transform(df_test[col], le)
+
+    return df_train, df_val, df_test, label_encoders
+
+
 def _apply_smotenc(
         df_train: pd.DataFrame,
         random_state: int = 207,
@@ -536,6 +584,82 @@ def _standardize_features(
         "cols_continuous": cols_continuous,
         "cols_onehot": cols_onehot,
         "feature_cols": feature_cols,
+        "scaler": scaler,
+    }
+
+
+def _standardize_features_for_embeddings(
+        df_train: pd.DataFrame,
+        df_val: pd.DataFrame,
+        df_test: pd.DataFrame,
+        cat_cols: List[str],
+        label_encoders: Dict[str, LabelEncoder],
+) -> Dict[str, Any]:
+    """
+    Prepare features for embedding models:
+    - Categorical features as integer arrays (for embedding lookup)
+    - Continuous features standardized
+    - Returns both separately for multi-input model architecture
+    """
+    y_train = df_train["FIRE_SIZE_LABEL"].values
+    y_val = df_val["FIRE_SIZE_LABEL"].values
+    y_test = df_test["FIRE_SIZE_LABEL"].values
+
+    feature_cols = [c for c in df_train.columns if c != "FIRE_SIZE_LABEL"]
+
+    # Separate categorical and continuous columns
+    present_cat_cols = [c for c in cat_cols if c in feature_cols]
+    cols_continuous = [c for c in feature_cols if c not in present_cat_cols]
+
+    # Extract categorical features as integers
+    X_train_cat = df_train[present_cat_cols].values.astype('int32') if present_cat_cols else None
+    X_val_cat = df_val[present_cat_cols].values.astype('int32') if present_cat_cols else None
+    X_test_cat = df_test[present_cat_cols].values.astype('int32') if present_cat_cols else None
+
+    # Extract and standardize continuous features
+    X_train_continuous = df_train[cols_continuous].astype('float32')
+    X_val_continuous = df_val[cols_continuous].astype('float32')
+    X_test_continuous = df_test[cols_continuous].astype('float32')
+
+    scaler = StandardScaler()
+    X_train_cont_std = scaler.fit_transform(X_train_continuous).astype('float32')
+    X_val_cont_std = scaler.transform(X_val_continuous).astype('float32')
+    X_test_cont_std = scaler.transform(X_test_continuous).astype('float32')
+
+    # Build categorical feature info for model construction
+    categorical_info = {}
+    for col in present_cat_cols:
+        le = label_encoders[col]
+        num_categories = len(le.classes_) + 1  # +1 for OOV
+
+        embed_dim = min(50, (num_categories + 1) // 2)
+        embed_dim = max(embed_dim, 2)  # At least 2 dimensions
+        categorical_info[col] = {
+            'num_categories': num_categories,
+            'embed_dim': embed_dim,
+            'col_idx': present_cat_cols.index(col),
+        }
+
+    return {
+        # Categorical features (integer encoded for embeddings)
+        "X_train_cat": X_train_cat,
+        "X_val_cat": X_val_cat,
+        "X_test_cat": X_test_cat,
+        # Continuous features (standardized)
+        "X_train_cont": X_train_cont_std,
+        "X_val_cont": X_val_cont_std,
+        "X_test_cont": X_test_cont_std,
+        # Labels
+        "Y_train": y_train,
+        "Y_val": y_val,
+        "Y_test": y_test,
+        # Metadata
+        "cols_categorical": present_cat_cols,
+        "cols_continuous": cols_continuous,
+        "categorical_info": categorical_info,
+        "label_encoders": label_encoders,
+        "scaler": scaler,
+        "feature_cols": feature_cols,
     }
 
 
@@ -543,15 +667,20 @@ def build_preprocessed_data(
         n_per_class: int = 1000,
         random_state: int = 207,
         use_smote: bool = False,
-        impute_strategy: str = "mean",
+        impute_strategy: str = "mean",  # "mean" or "subgroup_mean"
         smote_strategy: str = "smote",
         smote_sampling_strategy: str = "auto",
-        # New parameters for SMOTE pre-sampling
+
+        # Parameters for SMOTE pre-sampling
         smote_minority_n: int = 2000,
         smote_majority_cap: int = 8000,
+
+        # Output format for different model types
+        output_format: str = "onehot",  # "onehot" or "embedding"
 ) -> Dict[str, Any]:
     """
-    End-to-end preprocessing pipeline that mirrors Shanti's notebook, starting from raw CSV.
+    End-to-end preprocessing pipeline built on top of Shanti's notebook, starting from raw CSV. This notebook has some
+    memory logs to track RAM consumption during runtime due to prior OOM issues
 
     Parameters
     ----------
@@ -571,11 +700,20 @@ def build_preprocessed_data(
         When use_smote=True, sample up to this many from minority classes before SMOTE
     smote_majority_cap : int
         When use_smote=True, cap majority class at this size before SMOTE
+    output_format : str
+        "onehot" - One-hot encode categoricals (for FFNN, tree models)
+        "embedding" - Label encode categoricals (for embedding neural networks)
 
     Returns
     -------
     dict
-        Contains X_train_std, X_val_std, X_test_std, Y_train, Y_val, Y_test, and metadata
+        Contains X_train_std, X_val_std, X_test_std, Y_train, Y_val, Y_test, and metadata.
+
+        For output_format="embedding", additionally contains:
+        - X_train_cat, X_val_cat, X_test_cat (integer-encoded categoricals)
+        - X_train_cont, X_val_cont, X_test_cont (standardized continuous)
+        - categorical_info (dict with num_categories, embed_dim for each categorical)
+        - label_encoders (dict of fitted LabelEncoders)
     """
     _log_memory("Pipeline start")
 
@@ -637,12 +775,12 @@ def build_preprocessed_data(
     gc.collect()
 
     # 8. Select features of interest
-    trgt_feat_selected = _select_features(df_train)
-    df_train = df_train[trgt_feat_selected]
-    df_val = df_val[trgt_feat_selected]
-    df_test = df_test[trgt_feat_selected]
+    tgt_feat_selected = _select_features(df_train)
+    df_train = df_train[tgt_feat_selected]
+    df_val = df_val[tgt_feat_selected]
+    df_test = df_test[tgt_feat_selected]
 
-    # Downcast floats to reduce memory
+    # Reduce floats to 32 to reduce memory
     for data in [df_train, df_val, df_test]:
         cols_float = data.select_dtypes(include=['float64']).columns
         data[cols_float] = data[cols_float].astype('float32')
@@ -668,7 +806,7 @@ def build_preprocessed_data(
     # 11. Clean NWCG_CAUSE_CLASSIFICATION
     df_train, df_val, df_test = _clean_nwcg_cause_classification([df_train, df_val, df_test])
 
-    # 12. Apply SMOTE (now on manageable pre-sampled data)
+    # 12. Apply SMOTE
     if use_smote and smote_strategy == "smotenc":
         print("\nApplying SMOTENC on pre-sampled data...")
         df_train = _apply_smotenc(
@@ -676,26 +814,61 @@ def build_preprocessed_data(
             random_state=random_state,
             sampling_strategy=smote_sampling_strategy
         )
+    cat_cols = ["NWCG_CAUSE_CLASSIFICATION", "GACC_PL"]
 
-    # 13. One-Hot Encode
-    df_train, df_val, df_test = _one_hot_encode(df_train, df_val, df_test)
-    gc.collect()
+    if output_format == "embedding":
+        print("\nPreparing data for embedding model (label-encoded categoricals)...")
 
-    # 14. Standard SMOTE (after one-hot encoding)
-    if use_smote and smote_strategy == "smote":
-        print("\nApplying standard SMOTE...")
-        df_train = _apply_smote(
-            df_train,
-            random_state=random_state,
-            sampling_strategy=smote_sampling_strategy
+        df_train, df_val, df_test, label_encoders = _label_encode_categoricals(
+            df_train, df_val, df_test, cat_cols=cat_cols
+        )
+        gc.collect()
+
+        # Standardize and return embedding with appropriate format
+        result = _standardize_features_for_embeddings(
+            df_train, df_val, df_test, cat_cols, label_encoders
         )
 
-    # 15. Standardize continuous features and return arrays/metadata
-    result = _standardize_features(df_train, df_val, df_test)
+        # Also provide combined arrays for compatibility
+        if result["X_train_cat"] is not None:
+            result["X_train_std"] = np.concatenate([
+                result["X_train_cont"],
+                result["X_train_cat"].astype('float32')
+            ], axis=1)
+            result["X_val_std"] = np.concatenate([
+                result["X_val_cont"],
+                result["X_val_cat"].astype('float32')
+            ], axis=1)
+            result["X_test_std"] = np.concatenate([
+                result["X_test_cont"],
+                result["X_test_cat"].astype('float32')
+            ], axis=1)
+        else:
+            result["X_train_std"] = result["X_train_cont"]
+            result["X_val_std"] = result["X_val_cont"]
+            result["X_test_std"] = result["X_test_cont"]
+
+    else:
+        # 13. One-Hot Encode
+        df_train, df_val, df_test = _one_hot_encode(df_train, df_val, df_test)
+        gc.collect()
+
+        # 14. Standard SMOTE (after one-hot encoding)
+        if use_smote and smote_strategy == "smote":
+            print("\nApplying standard SMOTE...")
+            df_train = _apply_smote(
+                df_train,
+                random_state=random_state,
+                sampling_strategy=smote_sampling_strategy
+            )
+
+        # 15. Standardize continuous features and return arrays/metadata
+        result = _standardize_features(df_train, df_val, df_test)
 
     result["df_train_processed"] = df_train
     result["df_val_processed"] = df_val
     result["df_test_processed"] = df_test
+    result["output_format"] = output_format
 
     _log_memory("Pipeline complete")
 
@@ -703,43 +876,37 @@ def build_preprocessed_data(
 
 
 if __name__ == "__main__":
-    # Test run with SMOTENC
-    print("=" * 60)
-    print("Running preprocessing pipeline with SMOTENC")
-    print("=" * 60)
+    # Test run with SMOTENC and EMBEDDING output
+    print("Running preprocessing pipeline with SMOTENC + EMBEDDING format")
 
     data = build_preprocessed_data(
         use_smote=True,
         smote_strategy='smotenc',
         impute_strategy='subgroup_mean',
-        # Control pre-sampling size for SMOTE
         smote_minority_n=50000,
         smote_majority_cap=100000,
+        output_format='embedding',  # NEW: Get embedding-ready format
     )
 
-    Y_train_resampled = data["Y_train"]
-    X_train_res_std = data["X_train_std"]
-    Y_val = data["Y_val"]
-    X_val_std = data["X_val_std"]
-    Y_test = data["Y_test"]
-    X_test_std = data["X_test_std"]
+    print("\n" + "=" * 60)
+    print("Output Summary")
+    print("=" * 60)
 
-    pairs = [
-        (Y_train_resampled, X_train_res_std, 'Training Data'),
-        (Y_val, X_val_std, 'Validation Data'),
-        (Y_test, X_test_std, 'Test Data')
-    ]
+    print(f"\nCategorical features (integer-encoded):")
+    if data["X_train_cat"] is not None:
+        print(f"  Shape: {data['X_train_cat'].shape}")
+        print(f"  Columns: {data['cols_categorical']}")
+        print(f"  Sample values:\n{data['X_train_cat'][:3]}")
 
-    for pair in pairs:
-        print(f"{'-' * 10} {pair[2]} {'-' * 10}")
-        print(f"Shape of Y: {pair[0].shape}; Shape of X: {pair[1].shape}")
-        print(f"Y: {np.mean(pair[0]): .7f}")
-        print(f"X Mean: {np.mean(pair[1]): .7f}")
-        print(f"X Std: {np.std(pair[1]): .7f}")
-        print(f"X Min: {np.min(pair[1]): .7f}")
-        print(f"X Max: {np.max(pair[1]): .7f}\n")
+    print(f"\nContinuous features (standardized):")
+    print(f"  Shape: {data['X_train_cont'].shape}")
+    print(f"  Columns: {data['cols_continuous'][:5]}... ({len(data['cols_continuous'])} total)")
 
-    for pair in pairs:
-        print(f"{'-' * 10} {pair[2]} : Feature Mean {'-' * 10}")
-        print(f"Number of features: {len(np.mean(pair[1], axis=0))}")
-        print(f"{np.mean(pair[1], axis=0)}\n")
+    print(f"\nCategorical info for embedding layers:")
+    for col, info in data['categorical_info'].items():
+        print(f"  {col}: {info['num_categories']} categories -> {info['embed_dim']}D embedding")
+
+    print(f"\nLabels:")
+    print(f"  Y_train: {data['Y_train'].shape}, distribution: {np.bincount(data['Y_train'])}")
+    print(f"  Y_val: {data['Y_val'].shape}")
+    print(f"  Y_test: {data['Y_test'].shape}")
