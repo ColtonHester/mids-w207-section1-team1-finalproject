@@ -1,0 +1,19 @@
+name: tf_cpu_mids
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pandas=2.0.*
+  - numpy
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - imbalanced-learn
+  - polars
+  - pyarrow=14
+  - orjson
+  - jupyterlab
+  - ipykernel
+  - pip
+  - pip:
+      - tensorflow==2.11
