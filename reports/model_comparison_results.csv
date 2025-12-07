@@ -1,0 +1,21 @@
+model,imbalance_strategy,model_type,val_accuracy,val_macro_f1,val_weighted_f1,test_accuracy,test_macro_f1,test_weighted_f1,val_f1_small,val_f1_medium,val_f1_large,val_f1_very_large,val_recall_large,val_recall_very_large,model_strategy
+Logistic Regression,SMOTENC,baseline,0.5583,0.3283,0.5965,0.5567,0.3289,0.5955,0.7236,0.3892,0.1029,0.0975,0.2949,0.5864,"Logistic Regression
+(SMOTENC)"
+Random Forest,SMOTENC,baseline,0.7232,0.4436,0.7284,0.7224,0.437,0.7275,0.8158,0.6055,0.1843,0.1688,0.2414,0.1773,"Random Forest
+(SMOTENC)"
+XGBoost,SMOTENC,improvement,0.7247,0.4371,0.7277,0.7267,0.4332,0.7295,0.8205,0.596,0.1523,0.1798,0.1783,0.2909,"XGBoost
+(SMOTENC)"
+FFNN,SMOTENC,improvement,0.629,0.3797,0.6508,0.6281,0.374,0.6517,0.7726,0.455,0.1487,0.1424,0.3745,0.45,"FFNN
+(SMOTENC)"
+Embeddings,SMOTENC,improvement,0.6005,0.3723,0.6317,0.6017,0.3692,0.633,0.7489,0.4434,0.1443,0.1525,0.4225,0.5091,"Embeddings
+(SMOTENC)"
+Logistic Regression,Class Weights,baseline,0.4962,0.4963,0.4938,0.4862,0.48,0.4803,0.6278,0.4083,0.4049,0.5441,0.3879,0.5968,"Logistic Regression
+(Class Weights)"
+Random Forest,Class Weights,baseline,0.52,0.5194,0.5167,0.495,0.491,0.4908,0.6534,0.4409,0.4146,0.5686,0.3972,0.6237,"Random Forest
+(Class Weights)"
+XGBoost,Class Weights,improvement,0.525,0.5274,0.5251,0.5,0.4994,0.4996,0.6581,0.4548,0.4306,0.5663,0.4346,0.5968,"XGBoost
+(Class Weights)"
+FFNN,Class Weights,improvement,0.5012,0.4905,0.4853,0.5012,0.4882,0.4888,0.649,0.4199,0.2978,0.5951,0.2477,0.7151,"FFNN
+(Class Weights)"
+Embeddings,Class Weights,improvement,0.4962,0.4929,0.489,0.505,0.4958,0.4953,0.6334,0.3871,0.3636,0.5874,0.3645,0.6774,"Embeddings
+(Class Weights)"
