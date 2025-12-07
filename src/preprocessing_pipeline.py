@@ -271,6 +271,62 @@ def _one_hot_encode(df_train: pd.DataFrame, df_val: pd.DataFrame, df_test: pd.Da
     return df_train, df_val, df_test
 
 
+def _integer_encode_categoricals(
+    df_train: pd.DataFrame,
+    df_val: pd.DataFrame,
+    df_test: pd.DataFrame,
+    categorical_cols: List[str],
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, int], Dict[str, Any]]:
+    """
+    Integer-encode categorical columns for entity embeddings.
+
+    Instead of one-hot encoding, converts categorical values to integer indices
+    that can be used with Keras Embedding layers.
+
+    Args:
+        df_train, df_val, df_test: DataFrames to transform
+        categorical_cols: List of column names to encode
+
+    Returns:
+        Tuple of (df_train, df_val, df_test, cardinalities, encoders)
+        - cardinalities: Dict mapping column name to number of unique values
+        - encoders: Dict mapping column name to LabelEncoder instance
+    """
+    from sklearn.preprocessing import LabelEncoder
+
+    df_train = df_train.copy()
+    df_val = df_val.copy()
+    df_test = df_test.copy()
+
+    cardinalities = {}
+    encoders = {}
+
+    for col in categorical_cols:
+        if col not in df_train.columns:
+            continue
+
+        # Fit encoder on all unique values across splits to handle unseen categories
+        le = LabelEncoder()
+        all_values = pd.concat([
+            df_train[col].astype(str),
+            df_val[col].astype(str),
+            df_test[col].astype(str)
+        ]).unique()
+        le.fit(all_values)
+
+        # Transform each split
+        df_train[col] = le.transform(df_train[col].astype(str))
+        df_val[col] = le.transform(df_val[col].astype(str))
+        df_test[col] = le.transform(df_test[col].astype(str))
+
+        cardinalities[col] = len(le.classes_)
+        encoders[col] = le
+
+        print(f"  {col}: {cardinalities[col]} unique values")
+
+    return df_train, df_val, df_test, cardinalities, encoders
+
+
 def _standardize_features(
     df_train: pd.DataFrame,
     df_val: pd.DataFrame,
@@ -340,22 +396,32 @@ def build_preprocessed_data(
     random_state: int = 207,
     use_smote: bool = False,
     use_undersample: bool = False,
+    use_entity_embeddings: bool = False,
 ) -> Dict[str, Any]:
     """
     End-to-end preprocessing pipeline that mirrors Shanti's notebook, starting from raw CSV.
 
     Args:
-        n_per_class: Number of samples per class for balanced sampling (default: 1000)
+        n_per_class: Number of samples per class for balanced sampling (default: 1000).
+                     Set to None to skip balanced sampling and use full dataset.
         random_state: Random seed for reproducibility (default: 207)
         use_smote: If True, use SMOTE oversampling on training data (default: False)
         use_undersample: If True, undersample majority classes to minority size (default: False)
+        use_entity_embeddings: If True, return integer-encoded categoricals for entity embeddings
+                               instead of one-hot encoding. Returns separate continuous/categorical
+                               arrays with cardinality metadata. (default: False)
 
     Returns a dict containing:
-      - X_train_cont_std, X_val_cont_std, X_test_cont_std
-      - X_train_std, X_val_std, X_test_std
+      - X_train_cont_std, X_val_cont_std, X_test_cont_std (scaled continuous features)
+      - X_train_std, X_val_std, X_test_std (concatenated features - only when not using entity embeddings)
       - Y_train, Y_val, Y_test
       - cols_continuous, cols_onehot, feature_cols
-      - df_train_raw, df_val_raw, df_test_raw (before standardization, after encoding/imputation)
+      - df_train_processed, df_val_processed, df_test_processed
+
+      When use_entity_embeddings=True, also includes:
+      - X_train_cat, X_val_cat, X_test_cat (integer-encoded categorical features)
+      - cardinalities: Dict mapping categorical column to number of unique values
+      - cols_categorical: List of categorical column names
 
     Note: use_smote and use_undersample are mutually exclusive. If both are True, use_smote takes precedence.
     """
@@ -370,9 +436,11 @@ def build_preprocessed_data(
     # 3. Create FIRE_SIZE_LABEL
     df = _create_fire_size_label(df)
 
-    # 4. Balanced sampling (skip if using SMOTE or undersampling - they handle imbalance differently)
-    if use_smote or use_undersample:
+    # 4. Balanced sampling (skip if using SMOTE, undersampling, or n_per_class=None)
+    if use_smote or use_undersample or n_per_class is None:
         df_mini = df
+        if n_per_class is None:
+            print("Using full dataset (n_per_class=None)")
     else:
         df_mini = _sample_balanced_classes(df, n_per_class=n_per_class, random_state=random_state)
 
@@ -385,9 +453,9 @@ def build_preprocessed_data(
     df_mini = df_mini.loc[shuffled_idx].reset_index(drop=True)
 
     # 7. Train/val/test split (60/20/20) stratified by FIRE_YEAR
-    # If using SMOTE or undersampling, also stratify by FIRE_SIZE_LABEL to preserve class distribution
+    # If using SMOTE, undersampling, or full dataset, also stratify by FIRE_SIZE_LABEL to preserve class distribution
     stratify_cols = ["FIRE_YEAR"]
-    if use_smote or use_undersample:
+    if use_smote or use_undersample or n_per_class is None:
         stratify_cols.append("FIRE_SIZE_LABEL")
 
     df_train, df_val, df_test = _train_val_test_split(
@@ -414,8 +482,21 @@ def build_preprocessed_data(
     # 11. Clean NWCG_CAUSE_CLASSIFICATION
     df_train, df_val, df_test = _clean_nwcg_cause_classification([df_train, df_val, df_test])
 
-    # 12. One-hot encode NWCG_CAUSE_CLASSIFICATION and GACC_PL
-    df_train, df_val, df_test = _one_hot_encode(df_train, df_val, df_test)
+    # 12. Encode categorical features
+    CATEGORICAL_COLS = ['NWCG_CAUSE_CLASSIFICATION', 'GACC_PL']
+
+    if use_entity_embeddings:
+        # Integer encode for entity embeddings
+        print("Integer-encoding categorical features for entity embeddings...")
+        df_train, df_val, df_test, cardinalities, encoders = _integer_encode_categoricals(
+            df_train, df_val, df_test, CATEGORICAL_COLS
+        )
+        cols_categorical = [c for c in CATEGORICAL_COLS if c in df_train.columns]
+    else:
+        # One-hot encode (existing behavior)
+        df_train, df_val, df_test = _one_hot_encode(df_train, df_val, df_test)
+        cardinalities = None
+        cols_categorical = []
 
     if use_smote:
         X_train = df_train.drop(columns=["FIRE_SIZE_LABEL"])
@@ -437,7 +518,55 @@ def build_preprocessed_data(
         print("Undersampling done.")
 
     # 13. Standardize continuous features and return arrays/metadata
-    result = _standardize_features(df_train, df_val, df_test)
+    if use_entity_embeddings:
+        # Entity embeddings path: separate continuous and categorical
+        y_train = df_train["FIRE_SIZE_LABEL"].values
+        y_val = df_val["FIRE_SIZE_LABEL"].values
+        y_test = df_test["FIRE_SIZE_LABEL"].values
+
+        # Continuous columns (exclude target and categorical)
+        cols_continuous = [c for c in df_train.columns
+                          if c not in ['FIRE_SIZE_LABEL'] + cols_categorical]
+
+        # Scale continuous features
+        scaler = StandardScaler()
+        X_train_cont = scaler.fit_transform(df_train[cols_continuous])
+        X_val_cont = scaler.transform(df_val[cols_continuous])
+        X_test_cont = scaler.transform(df_test[cols_continuous])
+
+        # Extract categorical as integers
+        X_train_cat = df_train[cols_categorical].values.astype('int32')
+        X_val_cat = df_val[cols_categorical].values.astype('int32')
+        X_test_cat = df_test[cols_categorical].values.astype('int32')
+
+        result = {
+            # Continuous (scaled)
+            'X_train_cont': X_train_cont,
+            'X_val_cont': X_val_cont,
+            'X_test_cont': X_test_cont,
+            # Also include with _std suffix for compatibility
+            'X_train_cont_std': X_train_cont,
+            'X_val_cont_std': X_val_cont,
+            'X_test_cont_std': X_test_cont,
+            # Categorical (integer indices)
+            'X_train_cat': X_train_cat,
+            'X_val_cat': X_val_cat,
+            'X_test_cat': X_test_cat,
+            # Targets
+            'Y_train': y_train,
+            'Y_val': y_val,
+            'Y_test': y_test,
+            # Metadata for building embedding model
+            'cardinalities': cardinalities,
+            'cols_continuous': cols_continuous,
+            'cols_categorical': cols_categorical,
+            'feature_cols': cols_continuous + cols_categorical,
+            # Keep one-hot related keys empty for compatibility
+            'cols_onehot': [],
+        }
+    else:
+        # Original one-hot path
+        result = _standardize_features(df_train, df_val, df_test)
 
     # keep the processed dataframes (after encoding/imputation) if you want to inspect later
     result["df_train_processed"] = df_train
