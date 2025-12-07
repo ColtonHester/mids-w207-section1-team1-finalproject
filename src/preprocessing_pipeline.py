@@ -885,7 +885,7 @@ if __name__ == "__main__":
         impute_strategy='subgroup_mean',
         smote_minority_n=50000,
         smote_majority_cap=100000,
-        output_format='embedding',  # NEW: Get embedding-ready format
+        output_format='embedding',
     )
 
     print("\n" + "=" * 60)
