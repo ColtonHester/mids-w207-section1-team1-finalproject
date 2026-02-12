@@ -66,7 +66,7 @@ Class weights substantially outperformed SMOTENC oversampling for handling imbal
 
 - **Nedim Hodzic** ([nedim-dev](https://github.com/ColtonHester/mids-w207-section1-team1-finalproject/tree/nedim-dev)): Binning strategy, RF/FFNN/XGBoost configurations, East/West location variable, EDA visualizations. Presentation: EDA, Conclusion, Improvements.
 
-- **Shanti Agung** ([shanti-dev](https://github.com/ColtonHester/mids-w207-section1-team1-finalproject/tree/shanti-dev)): Feature selection, preprocessing pipelines (subgroup mean imputation, SMOTENC), RF/FFNN/Logistic models. Report: Preprocessing, Methodology, Experiments.
+- **Shanti Agung** ([shanti-dev](https://github.com/ColtonHester/mids-w207-section1-team1-finalproject/tree/shanti-dev)): Feature selection, preprocessing pipelines (feature engineering, subgroup mean imputation, SMOTENC), RF/FFNN/Logistic models. Report: Preprocessing, Methodology, Experiments.
 
 ## Links
 
